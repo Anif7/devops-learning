@@ -1,0 +1,108 @@
+#cloud-config
+
+timezone: Etc/UTC
+
+package_update: true
+
+packages:
+  - docker.io
+  - git
+  - curl
+  - ffmpeg
+
+groups:
+  - docker
+
+users:
+  - default
+  - name: testpress
+    gecos: Testpress application user
+    shell: /bin/bash
+    groups: [docker]
+    lock_passwd: true
+
+write_files:
+  - path: /opt/testpress/app.env
+    owner: testpress:testpress
+    permissions: "0640"
+    defer: true
+    content: |
+      APP_NAME=testpress
+      APP_ENV=development
+      LOG_LEVEL=info
+      SECRET_KEY=change-me
+
+  - path: /opt/testpress/app/server.py
+    owner: testpress:testpress
+    permissions: "0644"
+    defer: true
+    content: |
+      from http.server import BaseHTTPRequestHandler, HTTPServer
+
+      PORT = 8080
+
+
+      class TestpressHandler(BaseHTTPRequestHandler):
+          def do_GET(self):
+              if self.path == "/":
+                  self.send_text(200, "Hello from Testpress!\n")
+              elif self.path == "/health":
+                  self.send_text(200, "ok\n")
+              else:
+                  self.send_text(404, "Not found\n")
+
+          def send_text(self, status, body):
+              payload = body.encode()
+              self.send_response(status)
+              self.send_header("Content-Type", "text/plain; charset=utf-8")
+              self.send_header("Content-Length", str(len(payload)))
+              self.end_headers()
+              self.wfile.write(payload)
+
+
+      if __name__ == "__main__":
+          HTTPServer(("0.0.0.0", PORT), TestpressHandler).serve_forever()
+
+  - path: /opt/testpress/app/Dockerfile
+    owner: testpress:testpress
+    permissions: "0644"
+    defer: true
+    content: |
+      FROM python:3.12-alpine
+      WORKDIR /app
+      COPY server.py .
+      RUN adduser -D -u 10001 app
+      USER app
+      EXPOSE 8080
+      HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+        CMD wget -qO- http://127.0.0.1:8080/health || exit 1
+      CMD ["python", "-u", "server.py"]
+
+  - path: /etc/systemd/system/testpress-app.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Testpress hello app (Docker container)
+      Requires=docker.service
+      After=docker.service network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Restart=always
+      RestartSec=5
+      # "-" ignores the error when no leftover container exists.
+      ExecStartPre=-/usr/bin/docker rm -f testpress-app
+      ExecStart=/usr/bin/docker run --rm --name testpress-app \
+        --env-file /opt/testpress/app.env -p 8080:8080 testpress-app:latest
+      ExecStop=/usr/bin/docker stop testpress-app
+
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  - [chown, "testpress:testpress", /opt/testpress, /opt/testpress/app]
+  - [docker, build, -t, "testpress-app:latest", /opt/testpress/app]
+  - [systemctl, daemon-reload]
+  - [systemctl, enable, --now, testpress-app.service]
+
+final_message: "Testpress provisioning finished after $UPTIME seconds"
